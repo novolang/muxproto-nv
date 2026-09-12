@@ -1,0 +1,379 @@
+// muxattach.nv — the session a client attaches to, as values.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// AN ATTACH IS A STATE MACHINE WITH THREE STATES AND NOT A BOOLEAN.  A
+// session is HEADLESS (running, nobody watching), DRIVEN (a primary
+// client, possibly with mirrors behind it), or DETACHED-WITH-VIEWERS
+// (the primary left, mirrors remain, and one of them is about to be
+// promoted).  A server that tracked "attached: Bool" cannot tell the
+// first from the third, and the difference decides whether the next
+// connection is promoted straight to primary or filed as another
+// mirror.
+//
+// THE REATTACH COUNTER IS READ-AND-CLEAR BECAUSE A RUNNING TOTAL SAYS
+// NOTHING.  A pump that logged a total each tick prints the same number
+// forever, and a session that dropped and recovered four times looks
+// identical to one that never dropped.  Read-and-clear prints a line
+// per reattach and nothing in between, which is the observability the
+// counter exists for.
+//
+// A SESSION ID IS AN INDEX AND THE README SAYS SO.  `SWSE` carries a
+// position in the list `LSES` answered, not a name — so a client that
+// cached an index across a session being closed switches to the wrong
+// session, silently.  `MuxSessionRef` carries the index AND the name it
+// was at, so a caller can check before it switches; the protocol still
+// sends the index, because that is what the daemon reads.
+//
+// NOTHING HERE PERFORMS ANYTHING.  Every row in this module is `[]` —
+// the sockets are unixsock-nv's and the terminal is `std.pty`'s.  The
+// size type is `muxctl.MuxSize`, the same value a resize frame carries,
+// rather than a second pair of integers that would have to be kept in
+// step with it.
+
+use muxctl
+
+// What a session is doing about clients.
+pub enum MuxAttachState
+    // Running with nobody attached.  The ordinary state of a daemon,
+    // and the one where the next connection becomes the primary.
+    MuxHeadless
+    // A primary client is attached, with `mirrors` viewers behind it.
+    MuxDriven(mirrors: Int)
+    // The primary left and viewers remain.  Distinct from headless
+    // because the next tick promotes one of them rather than waiting.
+    MuxDetached(mirrors: Int)
+
+// One session in the list a daemon answers.
+//
+// The index is what `SWSE` carries; the name is what a person reads.
+// Both, because an index cached across a close names a different
+// session and a name the protocol does not carry cannot be sent.
+pub struct MuxSessionRef
+    index: Int
+    name: Str
+    // How many windows it holds, which is what makes the list useful
+    // without a second round trip.
+    windows: Int
+    // Whether this is the session the asking client is attached to.
+    current: Bool
+
+// One window inside a session.
+pub struct MuxWindowRef
+    index: Int
+    name: Str
+    panes: Int
+    active: Bool
+
+// What a client and a daemon have agreed, on this connection.
+//
+// A value the daemon threads per client.  `size` is what this client
+// last declared, which is NOT the session's size — the session's is the
+// minimum over every attached client, and that computation belongs to
+// whoever owns the set of clients rather than here.
+pub struct MuxAttachment
+    size: MuxSize
+    primary: Bool
+    // Reattaches since this counter was last read.  Read-and-clear.
+    reattaches: Int
+
+// A session with nobody attached.
+//
+// ```novo
+// use muxattach
+//
+// fn fresh() -> MuxAttachState
+//     muxattach.headless()
+//
+// fn main() [io]
+//     println("a session running with nobody watching")
+// ```
+pub fn headless() -> MuxAttachState []
+    todo("muxproto-nv.muxattach.headless")
+
+// Is anybody attached at all?
+//
+// ```novo
+// use muxattach
+//
+// fn main() [io]
+//     println("${muxattach.has_clients(muxattach.headless())}")
+// ```
+pub fn has_clients(s: MuxAttachState) -> Bool []
+    todo("muxproto-nv.muxattach.has_clients")
+
+// Is there a client whose keystrokes drive the session?
+//
+// Separate from `has_clients`, because the detached-with-viewers state
+// has clients and no driver — and a server that conflated them leaves
+// every viewer watching a session nothing can type into.
+//
+// ```novo
+// use muxattach
+//
+// fn main() [io]
+//     println("${muxattach.has_primary(muxattach.headless())}")
+// ```
+pub fn has_primary(s: MuxAttachState) -> Bool []
+    todo("muxproto-nv.muxattach.has_primary")
+
+// Should the next connection become the primary?
+//
+// `true` from headless and from detached-with-viewers, `false` while a
+// primary is attached.  The one question a daemon asks on every accept,
+// published so the answer is in one place rather than reimplemented at
+// each accept path — which is how the two paths in a multiplexer come
+// to disagree.
+//
+// ```novo
+// use muxattach
+//
+// fn main() [io]
+//     println("${muxattach.next_client_is_primary(muxattach.headless())}")
+// ```
+pub fn next_client_is_primary(s: MuxAttachState) -> Bool []
+    todo("muxproto-nv.muxattach.next_client_is_primary")
+
+// The state after a client attaches.
+//
+// ```novo
+// use muxattach
+//
+// fn joined(s: MuxAttachState) -> MuxAttachState
+//     muxattach.on_attach(s)
+//
+// fn main() [io]
+//     println("one more client")
+// ```
+pub fn on_attach(s: MuxAttachState) -> MuxAttachState []
+    todo("muxproto-nv.muxattach.on_attach")
+
+// The state after the primary leaves.
+//
+// Headless when it was the only client; detached-with-viewers
+// otherwise.
+//
+// ```novo
+// use muxattach
+//
+// fn left(s: MuxAttachState) -> MuxAttachState
+//     muxattach.on_primary_detach(s)
+//
+// fn main() [io]
+//     println("the driver left")
+// ```
+pub fn on_primary_detach(s: MuxAttachState) -> MuxAttachState []
+    todo("muxproto-nv.muxattach.on_primary_detach")
+
+// The state after a mirror leaves.
+//
+// ```novo
+// use muxattach
+//
+// fn left(s: MuxAttachState) -> MuxAttachState
+//     muxattach.on_mirror_detach(s)
+//
+// fn main() [io]
+//     println("a viewer left")
+// ```
+pub fn on_mirror_detach(s: MuxAttachState) -> MuxAttachState []
+    todo("muxproto-nv.muxattach.on_mirror_detach")
+
+// The state after a mirror is promoted to primary.
+//
+// ```novo
+// use muxattach
+//
+// fn promoted(s: MuxAttachState) -> MuxAttachState
+//     muxattach.on_promote(s)
+//
+// fn main() [io]
+//     println("a viewer, promoted to driver")
+// ```
+pub fn on_promote(s: MuxAttachState) -> MuxAttachState []
+    todo("muxproto-nv.muxattach.on_promote")
+
+// How many viewers are behind the primary.
+//
+// ```novo
+// use muxattach
+//
+// fn main() [io]
+//     println("${muxattach.mirror_count(muxattach.headless())}")
+// ```
+pub fn mirror_count(s: MuxAttachState) -> Int []
+    todo("muxproto-nv.muxattach.mirror_count")
+
+// A fresh attachment at a size.
+//
+// ```novo
+// use muxattach
+//
+// fn joined() -> MuxAttachment
+//     muxattach.attachment(40, 120, true)
+//
+// fn main() [io]
+//     println("what this client declared on the way in")
+// ```
+pub fn attachment(rows: Int, cols: Int, primary: Bool) -> MuxAttachment []
+    todo("muxproto-nv.muxattach.attachment")
+
+// The attachment with a new size, from a resize frame.
+//
+// A MIRROR's resize changes only its own recorded size; the session's
+// size is the minimum over every attached client, and that computation
+// belongs to whoever holds the set.  This function records one client's
+// number and says nothing about the session.
+//
+// ```novo
+// use muxattach
+//
+// fn resized(a: MuxAttachment) -> MuxAttachment
+//     muxattach.with_size(a, 50, 200)
+//
+// fn main() [io]
+//     println("one client, remeasured")
+// ```
+pub fn with_size(a: MuxAttachment, rows: Int, cols: Int) -> MuxAttachment []
+    todo("muxproto-nv.muxattach.with_size")
+
+// The size every client can see: the minimum over all of them.
+//
+// `None` for an empty list, because a session with nobody attached has
+// no size to be — and a default of 24 by 80 there resizes every shell
+// twice the moment somebody attaches.
+//
+// ```novo
+// use muxattach
+//
+// fn smallest(all: [MuxAttachment]) -> Bool
+//     match muxattach.smallest_size(all)
+//         Some(s) => true
+//         None    => false
+//
+// fn main() [io]
+//     println("the size the smallest client can see")
+// ```
+pub fn smallest_size(all: [MuxAttachment]) -> ?MuxSize []
+    todo("muxproto-nv.muxattach.smallest_size")
+
+// Count a reattach.
+//
+// ```novo
+// use muxattach
+//
+// fn came_back(a: MuxAttachment) -> MuxAttachment
+//     muxattach.count_reattach(a)
+//
+// fn main() [io]
+//     println("a client came back")
+// ```
+pub fn count_reattach(a: MuxAttachment) -> MuxAttachment []
+    todo("muxproto-nv.muxattach.count_reattach")
+
+// The reattach counter, read and cleared.
+//
+// ```novo
+// use muxattach
+//
+// fn since_last(a: MuxAttachment) -> MuxReattaches
+//     muxattach.take_reattaches(a)
+//
+// fn main() [io]
+//     println("how many times a client came back")
+// ```
+pub fn take_reattaches(a: MuxAttachment) -> MuxReattaches []
+    todo("muxproto-nv.muxattach.take_reattaches")
+
+// The attachment with the counter cleared, and what it held.
+pub struct MuxReattaches
+    attachment: MuxAttachment
+    count: Int
+
+// The session list as the text a daemon writes in answer to `LSES`.
+//
+// One line per session: index, tab, name, tab, window count, tab, a `*`
+// for the current one.  Tab-separated rather than aligned, because the
+// answer is parsed by a client far more often than it is read by a
+// person, and a formatter that aligned columns would make the parse
+// depend on the longest name.
+//
+// ```novo
+// use muxattach
+//
+// fn answer(all: [MuxSessionRef]) -> Str
+//     muxattach.session_list_text(all)
+//
+// fn main() [io]
+//     println("the session list, as a daemon writes it")
+// ```
+pub fn session_list_text(all: [MuxSessionRef]) -> Str []
+    todo("muxproto-nv.muxattach.session_list_text")
+
+// The session list a daemon's answer carries.
+//
+// The inverse, for the client side.  An empty list is a daemon with no
+// sessions, which is a real answer; a line this parser cannot read is
+// dropped rather than failing the whole list, because one malformed row
+// must not hide the nine good ones.
+//
+// ```novo
+// use muxattach
+//
+// fn read(text: Str) -> [MuxSessionRef]
+//     muxattach.parse_session_list(text)
+//
+// fn main() [io]
+//     println("the sessions a daemon is running")
+// ```
+pub fn parse_session_list(text: Str) -> [MuxSessionRef] []
+    todo("muxproto-nv.muxattach.parse_session_list")
+
+// Is this index still the session this name was at?
+//
+// The check a client should make before it sends `SWSE`, because the
+// protocol carries a POSITION and a session closed since the list was
+// read moves every session after it down one.
+//
+// ```novo
+// use muxattach
+//
+// fn safe(all: [MuxSessionRef]) -> Bool
+//     muxattach.index_still_names(all, 2, "build")
+//
+// fn main() [io]
+//     println("whether an index still means what it meant")
+// ```
+pub fn index_still_names(all: [MuxSessionRef], index: Int, name: Str) -> Bool []
+    todo("muxproto-nv.muxattach.index_still_names")
+
+// The windows a session holds, as the text a daemon writes.
+//
+// The same tab-separated shape as the session list, for the same
+// reason: parsed far more often than read.
+//
+// ```novo
+// use muxattach
+//
+// fn answer(all: [MuxWindowRef]) -> Str
+//     muxattach.window_list_text(all)
+//
+// fn main() [io]
+//     println("the windows in a session")
+// ```
+pub fn window_list_text(all: [MuxWindowRef]) -> Str []
+    todo("muxproto-nv.muxattach.window_list_text")
+
+// The windows a daemon's answer carries.
+//
+// ```novo
+// use muxattach
+//
+// fn read(text: Str) -> [MuxWindowRef]
+//     muxattach.parse_window_list(text)
+//
+// fn main() [io]
+//     println("the windows a session is running")
+// ```
+pub fn parse_window_list(text: Str) -> [MuxWindowRef] []
+    todo("muxproto-nv.muxattach.parse_window_list")

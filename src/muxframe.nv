@@ -1,0 +1,419 @@
+// muxframe.nv — one stream carrying a terminal and a control channel,
+// separated.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// THE STREAM IS A TERMINAL'S AND THE FRAMES RIDE IN IT.  A multiplexer's
+// client and its daemon share one socket: keystrokes go one way, screen
+// bytes come back, and in among them the client has to be able to say
+// "I resized", "capture that pane", "shut down".  A second connection
+// for the control channel would be simpler and would lose the ORDERING
+// — a resize that overtook the keystroke before it redraws at the wrong
+// size — so the frames ride the same stream and something has to pull
+// them out.  This is that something, and it performs nothing: bytes in,
+// frames and pass-through bytes out.
+//
+// `0x1c` IS NOT A BYTE THE TERMINAL STREAM CANNOT CONTAIN, AND
+// PRETENDING OTHERWISE IS THE BUG THIS MODULE IS BUILT NOT TO HAVE.
+// `0x1c` is FS, which a terminal sends when a person types Ctrl-\ — so
+// a filter that ran over a local TTY would eat a keystroke.  What makes
+// the framing safe is SCOPE: the decoder runs on the daemon socket,
+// where both ends agreed to speak this protocol, and never on a
+// terminal a person is typing at directly.  `escaped_prefix` is the
+// escape hatch for the byte itself, and the README says where the
+// boundary is.
+//
+// A FRAME IS TEXT AND ONE VERB IS NOT.  Every frame is `0x1c`, four or
+// more ASCII characters, an optional argument, and a newline — readable
+// in a packet dump, which is most of why it has survived.  The
+// exception is `KEYS`, whose header declares a byte count and is
+// followed by exactly that many RAW bytes, because injected keystrokes
+// contain newlines and escapes and anything else.  So the framing layer
+// knows exactly one thing about the vocabulary — which verb is
+// length-prefixed — and `payload_length_of` is that one fact published
+// as a function rather than buried in a state machine.
+//
+// AN OVERLONG HEADER IS NOT A FRAME.  A decoder with a fixed header
+// buffer that overflowed would silently drop whatever it had
+// accumulated, so a terminal stream containing `0x1c` followed by a
+// long line would lose that line.  Past `max_header_bytes` this decoder
+// gives up on the frame and emits everything it held as ORDINARY BYTES,
+// which is the answer that loses nothing.
+//
+// THE DECODER IS PER CONNECTION, AND THAT IS LOAD-BEARING.  Several
+// clients attach to one session and each sends its own frames; one
+// shared decoder splices the first half of one client's frame onto the
+// second half of another's and acts on a verb neither of them sent.
+// `MuxDecoder` is a value, so a server keeps one per client and the
+// mistake is not expressible.
+//
+// NOTHING HERE PERFORMS ANYTHING.  Every row in this module is `[]`.
+
+// One control frame, as bytes on the wire.
+//
+// `verb` is the four-or-more ASCII characters after the prefix;
+// `argument` is whatever followed the space, empty when there was none;
+// `payload` is the raw bytes for a length-prefixed verb and empty for
+// every other.
+pub struct MuxFrame
+    verb: Str
+    argument: Str
+    payload: Bytes
+
+// Where a decoder had got to.
+//
+// One per connection.  A value rather than a handle, so a server holds
+// one beside each client and two clients' frames cannot be spliced
+// together.
+pub struct MuxDecoder
+    // 0 between frames, non-zero inside one.  Carried so a caller can
+    // tell a connection that went quiet mid-frame from one that went
+    // quiet cleanly — the first is a client that died with a partial
+    // write and the second is a client that stopped typing.
+    state: Int
+    // How many header bytes have accumulated.
+    held: Int
+    // How many raw payload bytes a length-prefixed verb is still owed.
+    awaiting: Int
+    limits: MuxLimits
+
+// The two bounds a decoder needs.
+pub struct MuxLimits
+    // The longest frame header, prefix and newline included.  Past it
+    // the accumulated bytes are ordinary data rather than a frame.
+    max_header_bytes: Int
+    // The largest `KEYS` payload.  An injected paste is bounded
+    // somewhere, and the bound belongs to the receiver rather than to
+    // the sender — a client that asked to inject a gigabyte is a client
+    // that must be refused before the allocation, not after.
+    max_payload_bytes: Int
+
+// What one feed produced.
+//
+// THE LOAD-BEARING SHAPE OF THIS PACKAGE: both halves come back, in
+// order, from one call.  A decoder that answered only frames would lose
+// the terminal bytes between them, and one that answered only bytes
+// would be no decoder at all; a caller that had to call twice would
+// have to keep the two answers in step itself.
+pub struct MuxDrained
+    // Where to continue from.
+    decoder: MuxDecoder
+    // Everything that was not part of a frame, in order, with the frame
+    // bytes removed.  This is what goes to the terminal.
+    passthrough: Bytes
+    // The frames that COMPLETED in this chunk, in the order they
+    // arrived.  A header that arrived without its payload produces
+    // nothing here and leaves the decoder owing bytes.
+    frames: [MuxFrame]
+    // A frame this decoder refused.  Empty on the ordinary path; a
+    // caller that logs it can tell a client sending garbage from a
+    // client sending nothing.
+    faults: [MuxFault]
+
+// Why a frame was not one.
+pub enum MuxFault
+    // The header ran past `max_header_bytes` with no newline.  The
+    // bytes are in `passthrough`, not lost.
+    MuxOverlongHeader(held: Int, limit: Int)
+    // A `KEYS` length that is not a number, or is past
+    // `max_payload_bytes`.  Reported BEFORE the payload is accumulated,
+    // which is what makes the limit a bound and not a post-mortem.
+    MuxBadPayloadLength(text: Str, limit: Int)
+    // A verb shorter than four characters, or containing a byte that is
+    // not an uppercase letter or a digit.
+    MuxBadVerb(found: Str)
+    // A verb this decoder does not know.  Distinct from a bad one: a
+    // newer client talking to an older daemon sends a well-formed frame
+    // nobody here can act on, and a daemon that logged "protocol error"
+    // for it would be wrong about whose fault it was.
+    MuxUnknownVerb(verb: Str)
+    // An argument the verb requires, missing or unparseable.
+    MuxBadArgument(verb: Str, argument: Str)
+
+// The standard `Error` implementation, so a protocol fault can be
+// reported by anything that reports errors.
+impl Error for MuxFault
+    // One line: which frame, and what was wrong with it.
+    fn message(self) -> Str
+        todo("muxproto-nv.muxframe.MuxFault.message")
+
+// The byte a frame begins with: `0x1c`, ASCII FS.
+//
+// A function rather than a literal, because `28` and `0x1c` and `\x1c`
+// are the same number written three ways and a reader comparing code
+// against a packet dump should not have to convert.
+//
+// ```novo
+// use muxframe
+//
+// fn main() [io]
+//     println("${muxframe.frame_prefix()}")
+// ```
+pub fn frame_prefix() -> Int []
+    todo("muxproto-nv.muxframe.frame_prefix")
+
+// The byte a frame header ends with: `\n`.
+//
+// ```novo
+// use muxframe
+//
+// fn main() [io]
+//     println("${muxframe.frame_terminator()}")
+// ```
+pub fn frame_terminator() -> Int []
+    todo("muxproto-nv.muxframe.frame_terminator")
+
+// The default bounds: a 64-byte header and a 64 KiB payload.
+//
+// ```novo
+// use muxframe
+//
+// fn main() [io]
+//     println("${muxframe.default_limits().max_header_bytes}")
+// ```
+pub fn default_limits() -> MuxLimits []
+    todo("muxproto-nv.muxframe.default_limits")
+
+// Bounds a caller chose.
+//
+// ```novo
+// use muxframe
+//
+// fn main() [io]
+//     println("${muxframe.limits(64, 4096).max_payload_bytes}")
+// ```
+pub fn limits(max_header_bytes: Int, max_payload_bytes: Int) -> MuxLimits []
+    todo("muxproto-nv.muxframe.limits")
+
+// A decoder at the start of a stream.
+//
+// ```novo
+// use muxframe
+//
+// fn fresh() -> MuxDecoder
+//     muxframe.decoder(muxframe.default_limits())
+//
+// fn main() [io]
+//     println("a decoder for one connection")
+// ```
+pub fn decoder(l: MuxLimits) -> MuxDecoder []
+    todo("muxproto-nv.muxframe.decoder")
+
+// Feed a chunk, take the frames and the bytes.
+//
+// The whole loop a server writes: read from the socket, `feed`, write
+// `passthrough` to the terminal, act on `frames`.  A frame split across
+// two reads completes on the second, and the bytes around it are never
+// reordered — which is the property a second control connection could
+// not have given.
+//
+// ```novo
+// use muxframe
+//
+// fn tick(d: MuxDecoder, chunk: Bytes) -> MuxDrained
+//     muxframe.feed(d, chunk)
+//
+// fn main() [io]
+//     println("the terminal's bytes, and the control frames in them")
+// ```
+pub fn feed(d: MuxDecoder, chunk: Bytes) -> MuxDrained []
+    todo("muxproto-nv.muxframe.feed")
+
+// End of stream: whatever was held, as ordinary bytes.
+//
+// A connection that closed mid-frame leaves bytes in the decoder, and a
+// caller that dropped the decoder would drop them.  This is the answer
+// that does not: an incomplete frame was never a frame, so its bytes
+// were always data.
+//
+// ```novo
+// use muxframe
+//
+// fn last(d: MuxDecoder) -> Bytes
+//     muxframe.flush(d)
+//
+// fn main() [io]
+//     println("what a half-written frame leaves behind")
+// ```
+pub fn flush(d: MuxDecoder) -> Bytes []
+    todo("muxproto-nv.muxframe.flush")
+
+// Is this decoder in the middle of a frame?
+//
+// A connection that went quiet mid-frame is a client that died with a
+// partial write; one that went quiet between frames is a client that
+// stopped typing.  A server that could not tell them apart logs the
+// same line for both.
+//
+// ```novo
+// use muxframe
+//
+// fn partial(d: MuxDecoder) -> Bool
+//     muxframe.in_frame(d)
+//
+// fn main() [io]
+//     println("whether a client died mid-frame")
+// ```
+pub fn in_frame(d: MuxDecoder) -> Bool []
+    todo("muxproto-nv.muxframe.in_frame")
+
+// How many raw bytes follow this verb's header, from its argument.
+//
+// The ONE thing the framing layer knows about the vocabulary, published
+// as a function so it is visible rather than buried in a state machine.
+// `0` for every verb but `KEYS`; `None` when the argument is not a
+// number a length can be.
+//
+// ```novo
+// use muxframe
+//
+// fn following(verb: Str, argument: Str) -> Int
+//     match muxframe.payload_length_of(verb, argument)
+//         Some(n) => n
+//         None    => 0 - 1
+//
+// fn main() [io]
+//     println("how many raw bytes a header promises")
+// ```
+pub fn payload_length_of(verb: Str, argument: Str) -> ?Int []
+    todo("muxproto-nv.muxframe.payload_length_of")
+
+// A frame's bytes, ready to write.
+//
+// ```novo
+// use muxframe
+//
+// fn bytes_of(f: MuxFrame) -> Bytes
+//     muxframe.encode(f)
+//
+// fn main() [io]
+//     println("one frame, on the wire")
+// ```
+pub fn encode(f: MuxFrame) -> Bytes []
+    todo("muxproto-nv.muxframe.encode")
+
+// A frame with no argument and no payload.
+//
+// ```novo
+// use muxframe
+//
+// fn stop() -> MuxFrame
+//     muxframe.frame("KILL")
+//
+// fn main() [io]
+//     println("the shortest frame there is")
+// ```
+pub fn frame(verb: Str) -> MuxFrame []
+    todo("muxproto-nv.muxframe.frame")
+
+// A frame with an argument.
+//
+// ```novo
+// use muxframe
+//
+// fn resize() -> MuxFrame
+//     muxframe.frame_with("NMUX1", "40 120")
+//
+// fn main() [io]
+//     println("a frame that carries a value")
+// ```
+pub fn frame_with(verb: Str, argument: Str) -> MuxFrame []
+    todo("muxproto-nv.muxframe.frame_with")
+
+// A frame with raw bytes after its header.
+//
+// The `KEYS` shape, and the only one: the header declares the count and
+// the bytes follow uninterpreted, so an injected paste containing
+// newlines and escape sequences arrives unchanged.
+//
+// ```novo
+// use muxframe
+//
+// fn typed(b: Bytes) -> MuxFrame
+//     muxframe.frame_payload("KEYS", b)
+//
+// fn main() [io]
+//     println("keystrokes, injected")
+// ```
+pub fn frame_payload(verb: Str, payload: Bytes) -> MuxFrame []
+    todo("muxproto-nv.muxframe.frame_payload")
+
+// Does this buffer hold a whole frame at this offset?
+//
+// For a caller that already has the bytes and does not want a decoder:
+// answers the frame and how many bytes it spanned, or `None` when the
+// buffer ends inside it.  The same parse `feed` runs, exposed so a test
+// can name one frame.
+//
+// ```novo
+// use muxframe
+//
+// fn one(buf: Bytes) -> Bool
+//     match muxframe.parse_at(buf, 0, muxframe.default_limits())
+//         Some(hit) => true
+//         None      => false
+//
+// fn main() [io]
+//     println("whether a buffer holds a whole frame")
+// ```
+pub fn parse_at(buf: Bytes, at: Int, l: MuxLimits) -> ?MuxParsed []
+    todo("muxproto-nv.muxframe.parse_at")
+
+// One frame found in a buffer, and how far it reached.
+pub struct MuxParsed
+    frame: MuxFrame
+    // The offset just past the frame, so a caller loops without
+    // recomputing lengths.
+    next_at: Int
+
+// The bytes for a `0x1c` a caller wants to send as DATA.
+//
+// A person typing Ctrl-\ at an attached client is sending a byte this
+// protocol reserves.  A client that passed it through would have its
+// keystroke eaten by the daemon's decoder; this is the doubled form the
+// decoder unescapes, and it is the reason `feed` can be run over a
+// stream a person types into at all.
+//
+// ```novo
+// use muxframe
+//
+// fn literal() -> Bytes
+//     muxframe.escaped_prefix()
+//
+// fn main() [io]
+//     println("the byte a person typed, not the byte a frame starts with")
+// ```
+pub fn escaped_prefix() -> Bytes []
+    todo("muxproto-nv.muxframe.escaped_prefix")
+
+// Is this verb one this package knows?
+//
+// Published so a daemon can tell a NEWER client's well-formed frame
+// from a garbled one, and log the difference: the first is a version
+// skew and the second is a bug.
+//
+// ```novo
+// use muxframe
+//
+// fn main() [io]
+//     println("${muxframe.is_known_verb("KILL")}")
+// ```
+pub fn is_known_verb(verb: Str) -> Bool []
+    todo("muxproto-nv.muxframe.is_known_verb")
+
+// Every verb this package knows, in the order the README lists them.
+//
+// For a `--help`, for a test that asserts the set has not grown by
+// accident, and for a daemon that advertises what it speaks.
+//
+// ```novo
+// use muxframe
+//
+// fn all() -> [Str]
+//     muxframe.known_verbs()
+//
+// fn main() [io]
+//     println("every verb this protocol has")
+// ```
+pub fn known_verbs() -> [Str] []
+    todo("muxproto-nv.muxframe.known_verbs")

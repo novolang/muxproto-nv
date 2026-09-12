@@ -1,0 +1,145 @@
+// command_tests.nv — the eight verbs, and the three ways they differ.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented: muxproto-nv.muxctl.<fn>`.
+//
+// WHAT THIS FILE IS ABOUT.  The verbs are not interchangeable: some
+// expect an answer on the connection they arrived on, some close it,
+// and one of them a mirror client may not act on.  A caller that
+// treated them uniformly holds a connection open for a `KILL` and
+// closes one on a `CAPT`, which is exactly backwards — so each of the
+// three facts is a published predicate and each has an assertion here.
+
+use std.test
+use std.bytes
+use muxframe
+use muxctl
+
+@test
+fn test_every_command_knows_the_word_it_is_sent_as() [io]
+    test.case("kill")
+    test.assert_eq_str(muxctl.verb_of(MuxKill), "KILL")
+
+    test.case("resize, which is the one with a version number in it")
+    test.assert_eq_str(muxctl.verb_of(MuxResize(rows: 40, cols: 120)), "NMUX1")
+
+    test.case("capture")
+    test.assert_eq_str(muxctl.verb_of(MuxCapture(pane: None)), "CAPT")
+
+    test.case("list sessions")
+    test.assert_eq_str(muxctl.verb_of(MuxListSessions), "LSES")
+
+    test.case("switch session")
+    test.assert_eq_str(muxctl.verb_of(MuxSwitchSession(index: 2)), "SWSE")
+
+    test.case("status")
+    test.assert_eq_str(muxctl.verb_of(MuxStatus), "STAT")
+
+    test.case("reload")
+    test.assert_eq_str(muxctl.verb_of(MuxReload), "RLOD")
+
+    test.case("and keys")
+    test.assert_eq_str(muxctl.verb_of(MuxKeys(payload: bytes.zeros(0))), "KEYS")
+
+@test
+fn test_the_attach_prologue_is_bare_and_every_later_resize_is_framed() [io]
+    // THE ASSERTION THIS FILE EXISTS FOR.  On connect the client sends
+    // the size as a bare line, because at that moment the daemon is
+    // reading a prologue and not yet running a frame decoder.  A client
+    // that sent the framed form attaches with the daemon's size rather
+    // than its own.
+    let hello = muxctl.prologue(40, 120)
+
+    test.case("the prologue does not begin with the frame byte")
+    match bytes.byte_at(hello, 0)
+        None    => test.assert(false)
+        Some(b) => test.assert(b != muxframe.frame_prefix())
+
+    test.case("and the framed form does")
+    let framed = muxctl.encode_command(MuxResize(rows: 40, cols: 120))
+    match bytes.byte_at(framed, 0)
+        None    => test.assert(false)
+        Some(b) => test.assert_eq(b, muxframe.frame_prefix())
+
+    test.case("a prologue reads back to the size it carried")
+    match muxctl.parse_prologue("NMUX1 40 120")
+        None    => test.assert(false)
+        Some(s) =>
+            test.assert_eq(s.rows, 40)
+            test.assert_eq(s.cols, 120)
+
+    test.case("and a line that is not one is not read as zero by zero")
+    test.assert_none(muxctl.parse_prologue("hello"))
+
+@test
+fn test_a_frame_reads_back_as_the_command_it_was() [io]
+    test.case("a round trip through the wire form")
+    match muxctl.command_of(muxctl.command_frame(MuxSwitchSession(index: 3)))
+        Err(_) => test.assert(false)
+        Ok(c)  => test.assert_eq_str(muxctl.verb_of(c), "SWSE")
+
+    test.case("a verb from a newer client is a version skew, not a broken frame")
+    match muxctl.command_of(muxframe.frame("EVNT"))
+        Ok(_)  => test.assert(false)
+        Err(_) => test.assert(true)
+
+    test.case("and a verb whose argument will not parse is a different fault")
+    match muxctl.command_of(muxframe.frame_with("SWSE", "third"))
+        Ok(_)  => test.assert(false)
+        Err(_) => test.assert(true)
+
+@test
+fn test_three_verbs_are_questions_and_the_rest_are_statements() [io]
+    // A client that waited for an answer to a `KILL` hangs; one that
+    // closed after a `CAPT` gets nothing.
+    test.case("a capture is answered on the connection it arrived on")
+    test.assert(muxctl.expects_reply(MuxCapture(pane: None)))
+
+    test.case("so is a session list")
+    test.assert(muxctl.expects_reply(MuxListSessions))
+
+    test.case("and a status")
+    test.assert(muxctl.expects_reply(MuxStatus))
+
+    test.case("a kill is not")
+    test.assert(muxctl.expects_reply(MuxKill) == false)
+
+    test.case("and neither is a resize, which rides an attached client's stream")
+    test.assert(muxctl.expects_reply(MuxResize(rows: 24, cols: 80)) == false)
+
+@test
+fn test_expecting_a_reply_and_closing_the_connection_are_not_opposites() [io]
+    // A `KEYS` frame is fire-and-forget AND the connection closes,
+    // while a `NMUX1` frame closes nothing — so the two predicates are
+    // separate rather than one negated.
+    test.case("a resize leaves the connection open")
+    test.assert(muxctl.closes_connection(MuxResize(rows: 24, cols: 80)) == false)
+
+    test.case("and send-keys does not, even though nothing comes back")
+    test.assert(muxctl.closes_connection(MuxKeys(payload: bytes.from_str("ls\n"))))
+
+@test
+fn test_a_mirror_may_shut_the_session_down_and_may_not_resize_it() [io]
+    // The rule is asymmetric: a server that applied a mirror's resize
+    // to the session resizes everybody to the newest viewer's window.
+    test.case("any attached client may kill")
+    test.assert(muxctl.mirror_may_send(MuxKill))
+
+    test.case("and may inject keys")
+    test.assert(muxctl.mirror_may_send(MuxKeys(payload: bytes.from_str("q"))))
+
+    test.case("but a mirror's resize is about the mirror, not the session")
+    test.assert(muxctl.mirror_may_send(MuxResize(rows: 24, cols: 80)) == false)
+
+@test
+fn test_a_pane_target_is_an_option_and_not_a_sentinel() [io]
+    // A protocol that used -1 for "focused" is one where an off-by-one
+    // in the caller silently captures the wrong pane.
+    test.case("no argument means the focused pane")
+    test.assert_none(muxctl.capture_target(MuxCapture(pane: None)))
+
+    test.case("and an argument names one")
+    test.assert_some(muxctl.capture_target(MuxCapture(pane: Some(2))))
+
+    test.case("a command that is not a capture names no pane at all")
+    test.assert_none(muxctl.capture_target(MuxKill))

@@ -1,0 +1,158 @@
+// attach_tests.nv — three states, not a boolean, and the index that
+// moves.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented: muxproto-nv.muxattach.<fn>`.
+//
+// WHAT THIS FILE IS ABOUT.  Everything here is arithmetic over a value
+// — which session state follows which event, what the smallest client
+// can see, whether a cached index still names the session it named —
+// and that is exactly why it is a `core` package.  A multiplexer's
+// attach logic is testable with no terminal, no socket and no daemon.
+
+use std.test
+use std.list
+use muxattach
+
+@test
+fn test_a_session_with_nobody_watching_is_a_state_and_not_an_absence() [io]
+    let s = muxattach.headless()
+
+    test.case("nobody is attached")
+    test.assert(muxattach.has_clients(s) == false)
+
+    test.case("and there is no driver")
+    test.assert(muxattach.has_primary(s) == false)
+
+    test.case("no viewers")
+    test.assert_eq(muxattach.mirror_count(s), 0)
+
+    test.case("so the next connection drives")
+    test.assert(muxattach.next_client_is_primary(s))
+
+@test
+fn test_detached_with_viewers_is_not_headless() [io]
+    // THE ASSERTION THIS FILE EXISTS FOR.  A server tracking
+    // "attached: Bool" cannot tell them apart, and the difference
+    // decides whether the next connection is promoted straight to
+    // primary or filed as another mirror.
+    let driven = muxattach.on_attach(muxattach.on_attach(muxattach.headless()))
+
+    test.case("a primary and one viewer")
+    test.assert(muxattach.has_primary(driven))
+    test.assert_eq(muxattach.mirror_count(driven), 1)
+
+    test.case("so the next connection is a viewer too")
+    test.assert(muxattach.next_client_is_primary(driven) == false)
+
+    let detached = muxattach.on_primary_detach(driven)
+
+    test.case("with the primary gone there are still clients")
+    test.assert(muxattach.has_clients(detached))
+
+    test.case("and no driver")
+    test.assert(muxattach.has_primary(detached) == false)
+
+    test.case("which is the state a promotion acts on")
+    test.assert(muxattach.has_primary(muxattach.on_promote(detached)))
+
+@test
+fn test_the_last_viewer_leaving_goes_headless_rather_than_ending() [io]
+    // A session that ended when its last viewer left would be a
+    // terminal rather than a multiplexer.
+    let one = muxattach.on_attach(muxattach.headless())
+    let none_left = muxattach.on_primary_detach(one)
+
+    test.case("nobody attached")
+    test.assert(muxattach.has_clients(none_left) == false)
+
+    test.case("and the next connection drives again")
+    test.assert(muxattach.next_client_is_primary(none_left))
+
+    test.case("a viewer leaving from a driven session leaves the driver")
+    let driven = muxattach.on_attach(muxattach.on_attach(muxattach.headless()))
+    test.assert(muxattach.has_primary(muxattach.on_mirror_detach(driven)))
+
+@test
+fn test_the_smallest_client_decides_what_everybody_can_see() [io]
+    // Two clients at different terminal sizes cannot both see the whole
+    // session, and the minimum is taken per dimension rather than by
+    // area — a tall narrow window and a short wide one leave a small
+    // rectangle, not the larger of the two.
+    let big = muxattach.attachment(50, 200, true)
+    let small = muxattach.attachment(24, 300, false)
+
+    test.case("rows from one, columns from the other")
+    match muxattach.smallest_size([big, small])
+        None    => test.assert(false)
+        Some(s) =>
+            test.assert_eq(s.rows, 24)
+            test.assert_eq(s.cols, 200)
+
+    test.case("nobody attached is no size, rather than a default")
+    test.assert_none(muxattach.smallest_size([]))
+
+    test.case("and a resize records one client's number")
+    test.assert_eq(muxattach.with_size(big, 30, 100).size.rows, 30)
+
+@test
+fn test_the_reattach_counter_is_read_and_cleared() [io]
+    // A running total logged each tick prints the same number forever,
+    // and a session that dropped and recovered four times looks
+    // identical to one that never dropped.
+    let a = muxattach.attachment(24, 80, true)
+
+    test.case("a fresh attachment has had none")
+    test.assert_eq(muxattach.take_reattaches(a).count, 0)
+
+    test.case("one is counted")
+    let back = muxattach.count_reattach(a)
+    let taken = muxattach.take_reattaches(back)
+    test.assert_eq(taken.count, 1)
+
+    test.case("and reading again finds none, because the first read cleared it")
+    test.assert_eq(muxattach.take_reattaches(taken.attachment).count, 0)
+
+@test
+fn test_a_session_index_moves_when_a_session_closes() [io]
+    // `SWSE` carries a POSITION, so a client that cached an index
+    // across a session being closed switches to the wrong session,
+    // silently.
+    let before = [MuxSessionRef { index: 0, name: "main", windows: 3, current: true },
+                  MuxSessionRef { index: 1, name: "logs", windows: 1, current: false },
+                  MuxSessionRef { index: 2, name: "build", windows: 2, current: false }]
+    let after = [MuxSessionRef { index: 0, name: "main", windows: 3, current: true },
+                 MuxSessionRef { index: 1, name: "build", windows: 2, current: false }]
+
+    test.case("the index still names what it named")
+    test.assert(muxattach.index_still_names(before, 2, "build"))
+
+    test.case("and after the middle session closed it does not")
+    test.assert(muxattach.index_still_names(after, 2, "build") == false)
+
+@test
+fn test_the_session_list_is_parsed_far_more_often_than_it_is_read() [io]
+    // Tab-separated rather than aligned, because a formatter that
+    // aligned columns would make the parse depend on the longest name.
+    let all = [MuxSessionRef { index: 0, name: "main", windows: 3, current: true },
+               MuxSessionRef { index: 1, name: "build", windows: 2, current: false }]
+
+    test.case("two sessions, two lines")
+    test.assert_eq(list.len(muxattach.parse_session_list(muxattach.session_list_text(all))), 2)
+
+    test.case("an empty answer is a daemon with no sessions, which is a real answer")
+    test.assert_eq(list.len(muxattach.parse_session_list("")), 0)
+
+    test.case("and one malformed row does not hide the good ones")
+    test.assert_eq(list.len(muxattach.parse_session_list("0\tmain\t3\t*\nnonsense\n")), 1)
+
+@test
+fn test_the_window_list_has_the_same_shape_for_the_same_reason() [io]
+    let all = [MuxWindowRef { index: 0, name: "edit", panes: 2, active: true },
+               MuxWindowRef { index: 1, name: "test", panes: 1, active: false }]
+
+    test.case("two windows, two lines")
+    test.assert_eq(list.len(muxattach.parse_window_list(muxattach.window_list_text(all))), 2)
+
+    test.case("and nothing is an empty list")
+    test.assert_eq(list.len(muxattach.parse_window_list("")), 0)

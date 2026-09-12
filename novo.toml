@@ -1,0 +1,62 @@
+[package]
+name        = "muxproto-nv"
+license     = "Apache-2.0"
+version     = "0.0.1"
+description = "The terminal multiplexer control protocol as a codec that performs nothing: the 0x1c-prefixed frames a client and its daemon exchange over one stream, a feed-and-drain decoder that separates them from the terminal's own bytes, the eight verbs as values, the attach prologue in both its spellings, and the session state a reattach walks through.  Interface only — every body is a todo()."
+
+# `license` sits immediately after the name, before any value that could
+# contain a square bracket.  The publish reads it with a pattern that
+# stops at the first `[`, so a description naming an effect row hides it
+# and the release records no licence at all — silently.
+
+# An INTERFACE release: every `pub fn` body is a `todo()`, so the
+# signatures and the effect rows are published and nothing is
+# implemented.  `novo pkg publish` recognises the shape and requires
+# both the draft stability and the 0.0.x version; the first
+# implementation is the 0.1.0 published over it.
+stability   = "draft"
+
+# `core`, and the whole package is `[]`.  Bytes in, frames and
+# pass-through bytes out: the socket is unixsock-nv's, the
+# pseudoterminal is `std.pty`'s, and the screen is novomux's.  That is
+# what lets a client, a daemon and a test double all read one parser —
+# and it is what makes the protocol testable against a captured stream
+# with nothing running.
+#
+# The feed-and-drain shape is `docs/publishing.md` § How a `core`
+# package takes bytes from its host, first form: a record is small and
+# the stream is sequential, so the host pumps chunks in and takes
+# finished frames out.
+layer       = "core"
+
+category    = "terminal"
+
+tags        = ["multiplexer", "terminal", "protocol", "codec", "framing", "sans-io"]
+repository  = "https://github.com/novolang/muxproto-nv"
+maintainers = ["novo-lang"]
+novo        = ">= 0.8.9"
+
+# A library: no `main`, so `novo pkg build` type-checks and
+# effect-checks every module under `src/` and writes no binary.
+#
+# NO DEVICE CLAIM, and so no `tests/embedded_probe.nv`.  `Str` and
+# `Bytes` are throughout — a frame's verb and argument are text, and a
+# `KEYS` payload is a caller's buffer — and the consumer is a
+# multiplexer on a machine with a filesystem.  The `core-embedded` audit
+# row passes on a package that makes no claim, and this one does not.
+
+[docs.pages]
+"README.md" = "One stream, a terminal and a control channel"
+
+[dependencies]
+# NONE, and that is the point of the layer.
+#
+# NOT unixsock-nv, which carries these frames: this package takes a
+# chunk of bytes and answers what was in it, and a codec that named its
+# transport could not be tested against a captured stream or reused over
+# a pipe, a pseudoterminal or a test double.  The dependency runs the
+# other way round in a program and neither way round in the manifests.
+#
+# NOT a terminal package.  The pass-through bytes come back as `Bytes`
+# and what they mean is the caller's business; novo-vte parses them for
+# novomux, and this package would be wrong to assume that it does.

@@ -1,0 +1,205 @@
+// frame_tests.nv — the framing, and the two things it must never do:
+// lose a byte, or splice two clients together.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented: muxproto-nv.muxframe.<fn>`.
+// That is the expected result until the bodies land.
+//
+// WHERE THE CONSTANTS CAME FROM.  28 is `0x1c`, ASCII FS, which is the
+// byte every frame begins with and which a terminal also sends when a
+// person types Ctrl-\ — the whole reason the decoder's scope matters.
+// 10 is the newline every header ends with.  The verb set is the eight
+// the daemon acts on, and the test asserts the SET rather than each
+// member so that a verb added without a thought fails here.
+
+use std.test
+use std.bytes
+use std.list
+use muxframe
+
+// A decoder at the defaults, which every test starts from.
+fn fresh() -> MuxDecoder
+    muxframe.decoder(muxframe.default_limits())
+
+@test
+fn test_a_frame_begins_with_file_separator_and_ends_with_a_newline() [io]
+    test.case("0x1c, which is 28")
+    test.assert_eq(muxframe.frame_prefix(), 28)
+
+    test.case("and a newline, which is 10")
+    test.assert_eq(muxframe.frame_terminator(), 10)
+
+@test
+fn test_the_bounds_are_the_receiver_s_and_not_the_sender_s() [io]
+    // A client that asked to inject a gigabyte must be refused BEFORE
+    // the allocation, which is what makes the limit a bound rather than
+    // a post-mortem.
+    test.case("a header fits in a line")
+    test.assert(muxframe.default_limits().max_header_bytes >= 16)
+
+    test.case("a payload is bounded")
+    test.assert(muxframe.default_limits().max_payload_bytes > 0)
+
+    test.case("and a caller can choose both")
+    test.assert_eq(muxframe.limits(64, 4096).max_header_bytes, 64)
+    test.assert_eq(muxframe.limits(64, 4096).max_payload_bytes, 4096)
+
+@test
+fn test_a_stream_with_no_frames_in_it_passes_through_unchanged() [io]
+    // The ordinary case: screen bytes, byte for byte, with nothing
+    // added and nothing removed.
+    let d = fresh()
+    let out = muxframe.feed(d, bytes.from_str("hello world"))
+
+    test.case("every byte comes back")
+    test.assert_eq(bytes.len(out.passthrough), 11)
+
+    test.case("no frames")
+    test.assert_eq(list.len(out.frames), 0)
+
+    test.case("no faults")
+    test.assert_eq(list.len(out.faults), 0)
+
+    test.case("and the decoder is not mid-frame")
+    test.assert(muxframe.in_frame(out.decoder) == false)
+
+@test
+fn test_a_frame_is_removed_from_the_stream_and_the_bytes_around_it_are_not() [io]
+    // THE ASSERTION THIS FILE EXISTS FOR.  A second control connection
+    // would have been simpler and would have lost the ORDERING; the
+    // price is that the decoder must take the frame out without
+    // disturbing a byte on either side of it.
+    let d = fresh()
+    let stream = bytes.concat([bytes.from_str("ab"),
+                               muxframe.encode(muxframe.frame("KILL")),
+                               bytes.from_str("cd")])
+    let out = muxframe.feed(d, stream)
+
+    test.case("the four ordinary bytes survive")
+    test.assert_eq(bytes.len(out.passthrough), 4)
+
+    test.case("and one frame comes out")
+    test.assert_eq(list.len(out.frames), 1)
+
+@test
+fn test_a_frame_split_across_two_reads_completes_on_the_second() [io]
+    // A socket read returns whatever the kernel had, which is a frame
+    // and a half about as often as it is a frame.
+    let whole = muxframe.encode(muxframe.frame_with("NMUX1", "40 120"))
+    let half = bytes.len(whole) / 2
+    let first = muxframe.feed(fresh(), bytes.slice(whole, 0, half))
+
+    test.case("the first half produces no frame")
+    test.assert_eq(list.len(first.frames), 0)
+
+    test.case("and leaves the decoder inside one")
+    test.assert(muxframe.in_frame(first.decoder))
+
+    test.case("the second half completes it")
+    let second = muxframe.feed(first.decoder, bytes.slice(whole, half, bytes.len(whole)))
+    test.assert_eq(list.len(second.frames), 1)
+
+    test.case("and none of the frame's bytes reached the terminal")
+    test.assert_eq(bytes.len(first.passthrough) + bytes.len(second.passthrough), 0)
+
+@test
+fn test_a_half_written_frame_leaves_its_bytes_behind_rather_than_losing_them() [io]
+    // A client that died mid-write leaves bytes in the decoder, and a
+    // caller that dropped the decoder would drop them.  An incomplete
+    // frame was never a frame, so its bytes were always data.
+    let whole = muxframe.encode(muxframe.frame("LSES"))
+    let partial = muxframe.feed(fresh(), bytes.slice(whole, 0, 3))
+
+    test.case("nothing completed")
+    test.assert_eq(list.len(partial.frames), 0)
+
+    test.case("and flushing gives the held bytes back")
+    test.assert_eq(bytes.len(muxframe.flush(partial.decoder)), 3)
+
+@test
+fn test_an_overlong_header_is_not_a_frame_and_nothing_is_dropped() [io]
+    // A fixed buffer that overflowed would silently drop what it held,
+    // so a terminal stream containing 0x1c and then a long line would
+    // lose that line.
+    let d = muxframe.decoder(muxframe.limits(8, 64))
+    let long = bytes.concat([bytes.from_byte_list([28]), bytes.from_str("ABCDEFGHIJKLMNOP")])
+    let out = muxframe.feed(d, long)
+
+    test.case("no frame")
+    test.assert_eq(list.len(out.frames), 0)
+
+    test.case("a fault says why")
+    test.assert(list.len(out.faults) > 0)
+
+    test.case("and every byte came back as ordinary data")
+    test.assert_eq(bytes.len(out.passthrough), 17)
+
+@test
+fn test_only_one_verb_is_length_prefixed_and_the_framing_knows_only_that() [io]
+    // The one thing the framing layer knows about the vocabulary,
+    // published as a function rather than buried in a state machine.
+    test.case("KEYS declares a count")
+    match muxframe.payload_length_of("KEYS", "12")
+        None    => test.assert(false)
+        Some(n) => test.assert_eq(n, 12)
+
+    test.case("every other verb carries nothing after its header")
+    match muxframe.payload_length_of("CAPT", "3")
+        None    => test.assert(false)
+        Some(n) => test.assert_eq(n, 0)
+
+    test.case("and a count that is not a number is no count at all")
+    test.assert_none(muxframe.payload_length_of("KEYS", "lots"))
+
+@test
+fn test_a_keys_payload_is_raw_and_may_contain_the_terminator() [io]
+    // Injected keystrokes contain newlines and escapes and anything
+    // else, which is exactly why the verb is length-prefixed rather
+    // than newline-terminated.
+    let typed = bytes.from_str("ls -l\nexit\n")
+    let f = muxframe.frame_payload("KEYS", typed)
+    let out = muxframe.feed(fresh(), muxframe.encode(f))
+
+    test.case("one frame, newlines and all")
+    test.assert_eq(list.len(out.frames), 1)
+
+    test.case("and nothing leaked into the terminal's bytes")
+    test.assert_eq(bytes.len(out.passthrough), 0)
+
+@test
+fn test_a_buffer_can_be_parsed_without_a_decoder() [io]
+    // For a caller that already has the bytes: the same parse `feed`
+    // runs, exposed so a test can name one frame.
+    let whole = muxframe.encode(muxframe.frame("STAT"))
+
+    test.case("a whole frame is found, and its end is reported")
+    match muxframe.parse_at(whole, 0, muxframe.default_limits())
+        None    => test.assert(false)
+        Some(p) =>
+            test.assert_eq_str(p.frame.verb, "STAT")
+            test.assert_eq(p.next_at, bytes.len(whole))
+
+    test.case("and a buffer that ends inside one answers nothing")
+    test.assert_none(muxframe.parse_at(bytes.slice(whole, 0, 2), 0,
+                                       muxframe.default_limits()))
+
+@test
+fn test_a_person_typing_control_backslash_is_not_sending_a_frame() [io]
+    // 0x1c is FS, which a terminal sends when a person types Ctrl-\.
+    // A client that passed it through unescaped would have its
+    // keystroke eaten by the daemon's decoder.
+    test.case("the escaped form is longer than the byte it stands for")
+    test.assert(bytes.len(muxframe.escaped_prefix()) > 1)
+
+@test
+fn test_the_verb_set_is_eight_and_a_ninth_is_a_newer_client() [io]
+    // A daemon that logged "protocol error" for a well-formed frame it
+    // does not know would be wrong about whose fault it was.
+    test.case("the eight")
+    test.assert_eq(list.len(muxframe.known_verbs()), 8)
+
+    test.case("one of them")
+    test.assert(muxframe.is_known_verb("SWSE"))
+
+    test.case("and a verb from the future is not one of them")
+    test.assert(muxframe.is_known_verb("EVNT") == false)

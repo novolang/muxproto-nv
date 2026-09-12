@@ -1,0 +1,240 @@
+// muxctl.nv — what a frame means.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// EIGHT VERBS, AND THEY ARE NOT ALL THE SAME KIND OF THING.  Three
+// change the session (`KILL`, `SWSE`, `RLOD`), two are questions whose
+// answer comes back on the same connection (`CAPT`, `LSES`, `STAT` —
+// three, in fact), one carries input (`KEYS`), and one is a statement
+// about the client rather than a request at all (`NMUX1`, which says
+// how big this client's terminal is).  A caller that treated them
+// uniformly would hold a connection open for a `KILL` and close one on
+// a `CAPT`, which is exactly backwards — so `expects_reply` and
+// `closes_connection` are published predicates and not comments.
+//
+// `NMUX1` IS SENT TWICE, IN TWO DIFFERENT SPELLINGS, AND THAT IS THE
+// PART A REIMPLEMENTATION GETS WRONG.  On connect the client sends the
+// size as a BARE LINE — `NMUX1 <rows> <cols>\n`, with no `0x1c` prefix
+// — because at that moment the daemon is reading a prologue and not yet
+// running a frame decoder.  Every LATER resize is the framed form,
+// `0x1cNMUX1 <rows> <cols>\n`, in among the terminal bytes.  Same verb,
+// same argument, two encodings, and a client that sent the framed form
+// as its prologue attaches with the daemon's size rather than its own.
+// `prologue` and `command_frame` are the two, named apart.
+//
+// A PANE TARGET IS AN OPTION AND NOT A NUMBER.  `CAPT` with no argument
+// means the focused pane; `CAPT <n>` means pane `n`.  A protocol that
+// used `-1` for "focused" would be one where an off-by-one in the
+// caller silently captures the wrong pane, and one that required the
+// index would make the common case the verbose one.
+//
+// NOTHING HERE PERFORMS ANYTHING.  Every row in this module is `[]`.
+
+use muxframe
+
+// What a control frame asks for.
+//
+// One variant per verb, with its argument parsed.  The names carry the
+// package prefix because an enum variant is constructed by name across
+// a whole assembly, and `Kill` in a terminal package would take the
+// word from every consumer.
+pub enum MuxCommand
+    // This client's terminal is this big.  Sent bare on connect and
+    // framed on every later resize.
+    MuxResize(rows: Int, cols: Int)
+    // Shut the session down.  Any attached client may send it.
+    MuxKill
+    // Inject these bytes as though they had been typed at the focused
+    // pane.  The payload is raw: newlines, escapes and anything else.
+    MuxKeys(payload: Bytes)
+    // Serialise a pane's screen to this connection and close it.
+    // `None` is the focused pane.
+    MuxCapture(pane: ?Int)
+    // Write the session list to this connection and close it.
+    MuxListSessions
+    // Write the status document to this connection and close it.
+    MuxStatus
+    // Re-read the configuration, apply what can be applied live, write
+    // a summary to this connection and close it.
+    MuxReload
+    // Switch to the session at this index.
+    MuxSwitchSession(index: Int)
+
+// The verb word a command is sent as.
+//
+// ```novo
+// use muxctl
+//
+// fn main() [io]
+//     println(muxctl.verb_of(MuxKill))
+// ```
+pub fn verb_of(c: MuxCommand) -> Str []
+    todo("muxproto-nv.muxctl.verb_of")
+
+// The command a frame carries.
+//
+// `MuxUnknownVerb` for a verb this version does not know, which is a
+// newer client rather than a broken one; `MuxBadArgument` when the verb
+// is right and its argument is not.
+//
+// ```novo
+// use muxctl
+// use muxframe
+//
+// fn meaning(f: MuxFrame) -> Result<MuxCommand, MuxFault>
+//     muxctl.command_of(f)
+//
+// fn main() [io]
+//     println("what a frame is asking for")
+// ```
+pub fn command_of(f: MuxFrame) -> Result<MuxCommand, MuxFault> []
+    todo("muxproto-nv.muxctl.command_of")
+
+// The frame a command is sent as.
+//
+// The framed form, with the `0x1c` prefix — which is every command
+// except the attach prologue, and `prologue` is that one.
+//
+// ```novo
+// use muxctl
+// use muxframe
+//
+// fn on_the_wire(c: MuxCommand) -> MuxFrame
+//     muxctl.command_frame(c)
+//
+// fn main() [io]
+//     println("a command, as a frame")
+// ```
+pub fn command_frame(c: MuxCommand) -> MuxFrame []
+    todo("muxproto-nv.muxctl.command_frame")
+
+// The bare size line a client sends on connect.
+//
+// `NMUX1 <rows> <cols>\n` with NO prefix byte, because at that moment
+// the daemon is reading a prologue and not yet running a frame decoder.
+// A client that sent the framed form here attaches with the daemon's
+// size rather than its own, and the session redraws at the wrong width
+// until the next resize.
+//
+// ```novo
+// use muxctl
+//
+// fn hello() -> Bytes
+//     muxctl.prologue(40, 120)
+//
+// fn main() [io]
+//     println("the first line a client writes")
+// ```
+pub fn prologue(rows: Int, cols: Int) -> Bytes []
+    todo("muxproto-nv.muxctl.prologue")
+
+// The size a prologue line declares.
+//
+// `None` when the line is not one — which is what the daemon sees from
+// a client that connected and sent something else, and which must not
+// be read as "zero by zero".
+//
+// ```novo
+// use muxctl
+//
+// fn size(line: Str) -> Bool
+//     match muxctl.parse_prologue(line)
+//         Some(s) => true
+//         None    => false
+//
+// fn main() [io]
+//     println("the size a client announced")
+// ```
+pub fn parse_prologue(line: Str) -> ?MuxSize []
+    todo("muxproto-nv.muxctl.parse_prologue")
+
+// A client's terminal size.
+//
+// Both dimensions together, because they are always set together and a
+// pair of loose integers is a pair somebody eventually transposes.
+pub struct MuxSize
+    rows: Int
+    cols: Int
+
+// Does this command expect an answer on the same connection?
+//
+// `CAPT`, `LSES`, `STAT` and `RLOD` do: the daemon writes the answer to
+// the connection the request arrived on and then closes it.  Everything
+// else is fire-and-forget.  A client that waited for an answer to a
+// `KILL` hangs; one that closed after a `CAPT` gets nothing.
+//
+// ```novo
+// use muxctl
+//
+// fn main() [io]
+//     println("${muxctl.expects_reply(MuxListSessions)}")
+// ```
+pub fn expects_reply(c: MuxCommand) -> Bool []
+    todo("muxproto-nv.muxctl.expects_reply")
+
+// Does the daemon close the connection after acting on this?
+//
+// The other half of the same fact, and separate from it because they
+// are not opposites: a `KEYS` frame is fire-and-forget AND the
+// connection closes, while a `NMUX1` frame rides an attached client's
+// stream and closes nothing.
+//
+// ```novo
+// use muxctl
+//
+// fn main() [io]
+//     println("${muxctl.closes_connection(MuxKill)}")
+// ```
+pub fn closes_connection(c: MuxCommand) -> Bool []
+    todo("muxproto-nv.muxctl.closes_connection")
+
+// May a mirror client send this, or only the primary?
+//
+// A viewer may `KILL` — any attached client may shut the session down —
+// and may inject keys, but its `NMUX1` changes only its OWN recorded
+// size rather than the session's, because the primary owns the
+// dimensions.  Published because the rule is asymmetric and a server
+// that applied a mirror's resize to the session resizes everybody to
+// the newest viewer's window.
+//
+// ```novo
+// use muxctl
+//
+// fn main() [io]
+//     println("${muxctl.mirror_may_send(MuxKill)}")
+// ```
+pub fn mirror_may_send(c: MuxCommand) -> Bool []
+    todo("muxproto-nv.muxctl.mirror_may_send")
+
+// The pane a capture names, or `None` for the focused one.
+//
+// ```novo
+// use muxctl
+//
+// fn target(c: MuxCommand) -> Bool
+//     match muxctl.capture_target(c)
+//         Some(n) => true
+//         None    => false
+//
+// fn main() [io]
+//     println("which pane a capture wants")
+// ```
+pub fn capture_target(c: MuxCommand) -> ?Int []
+    todo("muxproto-nv.muxctl.capture_target")
+
+// The bytes a command is sent as, framing included.
+//
+// The convenience over `command_frame` and `muxframe.encode`, for a
+// client that has one thing to say and no decoder.
+//
+// ```novo
+// use muxctl
+//
+// fn on_the_wire(c: MuxCommand) -> Bytes
+//     muxctl.encode_command(c)
+//
+// fn main() [io]
+//     println("a command, ready to write")
+// ```
+pub fn encode_command(c: MuxCommand) -> Bytes []
+    todo("muxproto-nv.muxctl.encode_command")
