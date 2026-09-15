@@ -1,7 +1,7 @@
 [package]
 name        = "muxproto-nv"
 license     = "Apache-2.0"
-version     = "0.0.1"
+version     = "0.0.2"
 description = "The terminal multiplexer control protocol as a codec that performs nothing: the 0x1c-prefixed frames a client and its daemon exchange over one stream, a feed-and-drain decoder that separates them from the terminal's own bytes, the eight verbs as values, the attach prologue in both its spellings, and the session state a reattach walks through.  Interface only — every body is a todo()."
 
 # `license` sits immediately after the name, before any value that could
