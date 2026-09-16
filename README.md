@@ -239,7 +239,8 @@ when the connection closed, to see whether it went quiet mid-frame.
 - **The transport itself.** See "Related packages".
 - **A microcontroller build.** `Str` and `Bytes` run through the whole
   surface, and the consumer is a multiplexer on a machine with a
-  filesystem. This package makes no device claim.
+  filesystem. This package does not build for a microcontroller with no
+  heap allocator.
 
 ## Related packages
 
